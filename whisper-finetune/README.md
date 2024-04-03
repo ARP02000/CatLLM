@@ -7,7 +7,6 @@
 3. 执行 `python merge_lora.py` 将权重文件合并
 4. 测试环境下，推理可以通过执行命令 `python infer_tfs.py` 进行，注意修改好要推理的音频文件路径
 5. `infer_ct2.py` 依赖于转换后的CTranslate2模型，具体见注意事项部分
-6. `infer_server.py` 同样依赖于转换后的CTranslate2模型，如不需要部署到线上可忽略
 
 ## 注意事项
 1. 如不想进行fine-tune,仅需要在 `infer_tfs.py` 中将模型设置为openai提供的官方模型，同样能够实现推理过程
