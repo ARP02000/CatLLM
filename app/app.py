@@ -5,6 +5,7 @@ import time
 import json
 import wave
 from zhipuai import ZhipuAI
+import copy
 import os
 from presets import *
 from utils import *
@@ -13,69 +14,61 @@ import numpy as np
 import ffmpeg
 import socket
 import datetime
+from inference import get_tts_wav, transcribe
+from gradio_multimodalchatbot import MultimodalChatbot
+from gradio.data_classes import FileData
 
-api_key="ab0140939aef9898d0ce3939963ff0d9.c8o20urtFSfkp5FJ"
+
+api_key="your-apikey"
 client = ZhipuAI(api_key=api_key)
 
-# 加载模型
-model_path = "./models/whisper-finetune-ct2"
-use_gpu = True
-use_int8 = True
-beam_size = 10
-language = "zh"
-vad_filter = True
 
-if use_gpu:
-    if not use_int8:
-        model = WhisperModel(model_path, device="cuda", compute_type="float16", num_workers=1,
-                             local_files_only=True)
+
+def answer(user_input, history_record, chatbot):
+    """
+    :param history_record:
+    :param chatbot:
+    :return:
+    """
+    user_input = user_input.strip()
+    if len(user_input) == 0:
+        return "", history_record, chatbot
     else:
-        model = WhisperModel(model_path, device="cuda", compute_type="int8_float16", num_workers=1,
-                             local_files_only=True)
-else:
-    model = WhisperModel(model_path, device="cpu", compute_type="int8", num_workers=1,
-                         local_files_only=True)
+        history_record.append({"role": "user", "content": user_input})
+        user_input_dict = {
+            "text": user_input,
+            "files": []
+        }
+        chatbot += [[user_input_dict, {"text": "", "files": []}]]
 
+        print("------------answer---------------------")
+        print(chatbot, type(chatbot))
+        print("answer")
+        print(history_record, chatbot)
 
-def answer(history_record, chatbot):
-    """
-    :param history_record:
-    :param chatbot:
-    :return:
-    """
-    print("------------answer---------------------")
-    print(chatbot, type(chatbot))
-    print("answer")
-    print(history_record, chatbot)
-    if history_record[-1]['content'] != "":
-        response = client.chat.completions.create(
-            model="glm-4",  # 填写需要调用的模型名称
-            messages=history_record,
-            stream=True,
-        )
+        prompt_record = copy.deepcopy(history_record)
+        prompt_record[-1]["content"] += " 回答不超过30个字"
+        question = user_input.replace("\n", "").replace("-", "")
+        if question != "":
+            response = client.chat.completions.create(
+                model="glm-4",  # 填写需要调用的模型名称
+                messages=prompt_record,
+                stream=True,
+            )
 
-        for chunk in response:
-            if chunk.choices[0].delta.content is not None:
-                chatbot[-1][1] += chunk.choices[0].delta.content
-        history_record.append({"role":"assistant", "content":chatbot[-1][1]})
-        print("after history:", history_record)
-        print("after chatbot:", chatbot)
+            message = ""
+            for chunk in response:
+                if chunk.choices[0].delta.content is not None:
+                    message += chunk.choices[0].delta.content
+                    chatbot[-1][-1]["text"] += chunk.choices[0].delta.content
+            history_record.append({"role": "assistant", "content": message})
+            print("after history:", history_record)
+            print("after chatbot:", chatbot)
+            chatbot[-1][-1]["text"] = message
 
-    return chatbot
-
-
-def ask(user_input, chatbot, history_record):
-    """
-    :param user_input:
-    :param chatbot:
-    :param history_record:
-    :return:
-    """
-    history_record.append({"role": "user", "content": user_input})
-    chatbot += [[user_input, ""]]
-
-    print(history_record, chatbot)
-    return "", history_record, chatbot
+        filename = get_tts_wav(chatbot[-1][-1]["text"], question)
+        chatbot[-1][-1]["files"] = [{"file": FileData(path=filename)}]
+        return "", history_record, chatbot
 
 
 def retry(history_record, chatbot):
@@ -84,37 +77,28 @@ def retry(history_record, chatbot):
     :param chatbot:
     :return:
     """
-    logging.info("Retry...")
     if len(history_record) == 0:
-        return [["Empty context", ""]]
+        pass
     else:
-        chatbot[-1][1] = ""
         history_record.pop()
+        user_input = history_record[-1]["content"]
+        history_record.pop()
+        chatbot.pop()
         print("retry------------")
-        print(history_record)
-        chatbot = answer(history_record, chatbot)
-        return chatbot
-
-
-def transcribe(audio_path):
-    # 语音识别
-    segments, info = model.transcribe(audio_path, beam_size=beam_size, language=language,
-                                      vad_filter=vad_filter)
-    res = ""
-    for segment in segments:
-        res += segment.text
-    return res
+        print(history_record, user_input, chatbot)
+        _, history_record, chatbot = answer(user_input, history_record, chatbot)
+        return "", history_record, chatbot
 
 
 def save_wavfile(src_path, file_id):
     hostname = socket.gethostname()
-    dst_path = f"./audio_file/{hostname}/{datetime.datetime.now().strftime('%Y-%m-%d')}"
+    dst_path = f"./audio/{hostname}/{datetime.datetime.now().strftime('%Y-%m-%d')}"
     if os.path.exists(dst_path):
         pass
     else:
-        os.mkdir(dst_path)
+        os.makedirs(dst_path)
 
-    new_filename = os.path.join(dst_path, f"audio_{file_id}.wav")
+    new_filename = os.path.join(dst_path, f"audio_{file_id}_{datetime.datetime.now().microsecond}.wav")
     if os.path.exists(new_filename):
         os.remove(new_filename)
     ffmpeg.input(src_path).output(new_filename, ar=16000).run()
@@ -132,9 +116,10 @@ with gr.Blocks() as demo:
         gr.HTML(title)
         status_display = gr.Markdown("Success", elem_id="status_display")
     gr.Markdown(description_top)
-    chatbot = gr.Chatbot(
+    chatbot = MultimodalChatbot(
         [],
-        avatar_images=(None, (r"./pic/猫猫头.jpg"))
+        avatar_images=(None, "./pic/猫猫头.jpg"),
+        show_copy_button=True,
     )
 
     with gr.Row():
@@ -185,49 +170,31 @@ with gr.Blocks() as demo:
     answer_args = dict(
         fn=answer,
         inputs=[
+            user_input,
             history_record,
             chatbot,
         ],
-        outputs=[chatbot],
-        show_progress=True,
-    )
-
-    ask_args = dict(
-        fn=ask,
-        inputs=[
-            user_input,
-            chatbot,
-            history_record
-        ],
         outputs=[user_input, history_record, chatbot],
         show_progress=True,
     )
 
-    transfer_input_args = dict(
-        fn=transfer_input,
-        inputs=[user_input],
-        outputs=[user_input, user_input, submitBtn],
-        show_progress=True
-    )
-
-    predict_event1 = user_input.submit(**ask_args).then(**answer_args)
+    predict_event1 = user_input.submit(**answer_args)
 
     predict_event2 = submitBtn.click(
-        fn=ask,
+        fn=answer,
         inputs=[
             user_input,
-            chatbot,
-            history_record
+            history_record,
+            chatbot
         ],
         outputs=[user_input, history_record, chatbot],
-        show_progress=True,
         cancels=predict_event1
-    ).then(**answer_args)
+    )
 
     predict_event3 = retryBtn.click(
         fn=retry,
         inputs=[history_record, chatbot],
-        outputs=[chatbot],
+        outputs=[user_input, history_record, chatbot],
         cancels=[predict_event1, predict_event2],
     )
 
@@ -235,7 +202,6 @@ with gr.Blocks() as demo:
         fn=delete_last_conversation,
         inputs=[chatbot, history_record],
         outputs=[chatbot, history_record, status_display],
-        show_progress=True,
         cancels=[predict_event1, predict_event2, predict_event3]
     )
 
